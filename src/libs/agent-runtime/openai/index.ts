@@ -1,4 +1,5 @@
 import { OpenAIStream, StreamingTextResponse } from 'ai';
+import { Langfuse } from 'langfuse';
 import OpenAI, { ClientOptions } from 'openai';
 import urlJoin from 'url-join';
 
@@ -15,17 +16,18 @@ import { handleOpenAIError } from '../utils/handleOpenAIError';
 
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
 
-interface AzureOpenAIOptions extends ClientOptions {
+interface LobeOpenAIOptions extends ClientOptions {
   azureOptions?: {
     apiVersion?: string;
     model?: string;
   };
   useAzure?: boolean;
 }
+
 export class LobeOpenAI implements LobeRuntimeAI {
   private client: OpenAI;
 
-  constructor(options: AzureOpenAIOptions) {
+  constructor(options: LobeOpenAIOptions) {
     if (!options.apiKey) throw AgentRuntimeError.createError(AgentRuntimeErrorType.NoOpenAIAPIKey);
 
     if (options.useAzure) {
@@ -42,9 +44,12 @@ export class LobeOpenAI implements LobeRuntimeAI {
   async chat(payload: ChatStreamPayload) {
     // ============  1. preprocess messages   ============ //
     const { messages, ...params } = payload;
+    const langfuse = new Langfuse();
 
     // ============  2. send api   ============ //
+    const trace = langfuse.trace({ input: messages });
 
+    const startTime = new Date();
     try {
       const response = await this.client.chat.completions.create(
         {
@@ -55,7 +60,20 @@ export class LobeOpenAI implements LobeRuntimeAI {
         { headers: { Accept: '*/*' } },
       );
 
-      const stream = OpenAIStream(response);
+      const stream = OpenAIStream(response, {
+        onFinal: async (completion) => {
+          trace.generation({
+            endTime: new Date(),
+            input: messages,
+            model: params.model,
+            modelParameters: params as any,
+            output: completion,
+            startTime: startTime,
+          });
+          trace.update({ output: completion });
+          await langfuse.shutdownAsync();
+        },
+      });
 
       const [debug, prod] = stream.tee();
 
@@ -85,7 +103,7 @@ export class LobeOpenAI implements LobeRuntimeAI {
     }
   }
 
-  static initWithAzureOpenAI(options: AzureOpenAIOptions) {
+  static initWithAzureOpenAI(options: LobeOpenAIOptions) {
     const endpoint = options.baseURL!;
     const model = options.azureOptions?.model || '';
 
